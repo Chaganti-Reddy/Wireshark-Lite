@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Wireshark Lite - Dual Pause Modes</title>
+  <script src="https://cdn.socket.io/4.0.1/socket.io.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1"></script>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
+    h2, h3 { color: #00ffa2; }
+    .flex { display: flex; gap: 30px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { border: 1px solid #333; padding: 8px; text-align: left; }
+    th { background-color: #222; }
+    tr:nth-child(even) { background-color: #1b1b1b; }
+    .controls { margin-bottom: 20px; }
+    .alert { background-color: #ff0040; padding: 10px; margin-top: 10px; border-radius: 5px; color: white; font-weight: bold; }
+    .stats, .dns { background: #222; padding: 10px; max-height: 400px; overflow-y: auto; margin-top: 10px; }
+    button, select { margin-left: 10px; padding: 6px 12px; }
+    #statusLabel { margin-left: 20px; font-weight: bold; }
+  </style>
+</head>
+<body>
+
+  <h2>📡 Real-Time Packet Sniffer - Dual Pause Mode</h2>
+
+  <div class="controls">
+    <label><input type="checkbox" value="TCP" checked> TCP</label>
+    <label><input type="checkbox" value="UDP" checked> UDP</label>
+    <label><input type="checkbox" value="ICMP" checked> ICMP</label>
+    <label><input type="checkbox" id="foreignOnly"> Foreign IPs Only</label>
+
+    <select id="pauseType" onchange="changePauseMode(this)">
+      <option value="soft">Pause Mode: Soft</option>
+      <option value="hard">Pause Mode: Hard</option>
+    </select>
+
+    <button onclick="pauseSniffing()">⏸️ Pause</button>
+    <button onclick="resumeSniffing()">▶️ Resume</button>
+    <button onclick="clearLog()">🧹 Clear Log</button>
+    <button onclick="downloadCSV()">📥 CSV</button>
+    <button onclick="downloadPCAP()">🧪 PCAP</button>
+    <button onclick="downloadChartCSV()">📤 Export Chart CSV</button>
+    <button onclick="trafficChart.resetZoom()">🔁 Reset Zoom</button>
+
+    <span id="statusLabel" style="color: #0f0;">🟢 Live</span>
+  </div>
+
+  <div class="flex">
+    <div style="flex: 1;">
+      <h3>🌐 Traffic Stats</h3>
+      <div class="stats" id="stats-box"></div>
+      <div id="alert-box"></div>
+      <h3>🔍 DNS Queries</h3>
+      <div class="dns" id="dns-list"></div>
+    </div>
+    <div style="flex: 3;">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Protocol</th>
+            <th>Source IP</th>
+            <th>Destination IP</th>
+            <th>Country</th>
+            <th>Domain (if DNS)</th>
+          </tr>
+        </thead>
+        <tbody id="packet-log"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <h3>📈 Traffic Over Time</h3>
+  <canvas id="trafficChart" height="150" style="background:#222; padding: 10px; border-radius: 8px; margin-bottom: 20px;"></canvas>
+
+  <script>
+    const socket = io();
+    const log = document.getElementById('packet-log');
+    const statsBox = document.getElementById('stats-box');
+    const alertBox = document.getElementById('alert-box');
+    const dnsList = document.getElementById('dns-list');
+    const statusLabel = document.getElementById('statusLabel');
+    const filters = { TCP: true, UDP: true, ICMP: true };
+
+    document.querySelectorAll('input[type=checkbox]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        filters[cb.value] = cb.checked;
+      });
+    });
+
+    document.getElementById('foreignOnly').addEventListener('change', () => {
+      filters['foreign'] = document.getElementById('foreignOnly').checked;
+    });
+
+    function changePauseMode(select) {
+      fetch('/pause_mode/' + select.value);
+    }
+
+    function pauseSniffing() {
+      fetch('/pause');
+      statusLabel.textContent = '🔴 Paused';
+      statusLabel.style.color = 'red';
+    }
+
+    function resumeSniffing() {
+      fetch('/resume');
+      statusLabel.textContent = '🟢 Live';
+      statusLabel.style.color = '#0f0';
+    }
+
+    function downloadCSV() {
+      window.location.href = '/download';
+    }
+
+    function downloadPCAP() {
+      window.location.href = '/download/pcap';
+    }
+
+    function downloadChartCSV() {
+      window.location.href = '/rate_csv';
+    }
+
+    function clearLog() {
+      fetch('/clear');
+      log.innerHTML = '';
+      statsBox.innerHTML = '';
+      trafficChart.data.labels = [];
+      trafficChart.data.datasets.forEach(ds => ds.data = []);
+      trafficChart.update();
+    }
+
+    function fetchDNS() {
+      fetch('/dns_queries')
+        .then(res => res.json())
+        .then(domains => {
+          dnsList.innerHTML = '';
+          [...new Set(domains)].slice(-20).reverse().forEach(domain => {
+            dnsList.innerHTML += `<div>${domain}</div>`;
+          });
+        });
+    }
+
+    socket.on('packet', data => {
+      if (!filters[data.protocol]) return;
+      if (filters['foreign'] && data.country === 'Local') return;
+
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${data.timestamp}</td>
+        <td>${data.protocol}</td>
+        <td>${data.source_ip}</td>
+        <td>${data.dest_ip}</td>
+        <td>${data.country}</td>
+        <td>${data.dns || ''}</td>
+      `;
+      log.prepend(row);
+      if (log.children.length >= 100) log.removeChild(log.lastChild);
+    });
+
+    socket.on('stats', data => {
+      statsBox.innerHTML = '';
+      const sorted = Object.entries(data).sort((a, b) => b[1] - a[1]);
+      sorted.slice(0, 10).forEach(([ip, count]) => {
+        statsBox.innerHTML += `<div>${ip} — ${count} packets</div>`;
+      });
+    });
+
+    socket.on('alert', data => {
+      alertBox.innerHTML = `<div class="alert">⚠️ High traffic from ${data.ip} (${data.count} packets in 10s)</div>`;
+      const currentIndex = trafficChart.data.labels.length - 1;
+      if (currentIndex >= 0) {
+        trafficChart.data.datasets[1].data[currentIndex] = trafficChart.data.datasets[0].data[currentIndex];
+        trafficChart.update();
+      }
+      setTimeout(() => { alertBox.innerHTML = ''; }, 6000);
+    });
+
+    const ctx = document.getElementById('trafficChart').getContext('2d');
+    const trafficChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: 'Packets/sec',
+            data: [],
+            borderWidth: 2,
+            borderColor: '#00ffa2',
+            backgroundColor: 'rgba(0,255,162,0.1)',
+            fill: true,
+            tension: 0.3
+          },
+          {
+            label: 'Alert Spike',
+            data: [],
+            borderColor: 'red',
+            backgroundColor: 'red',
+            pointRadius: 5,
+            pointHoverRadius: 6,
+            fill: false,
+            showLine: false
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        animation: false,
+        plugins: {
+          legend: { display: true, labels: { color: '#fff' } },
+          zoom: {
+            pan: { enabled: true, mode: 'x' },
+            zoom: {
+              wheel: { enabled: true },
+              pinch: { enabled: true },
+              mode: 'x'
+            }
+          }
+        },
+        scales: {
+          x: { ticks: { color: '#ccc' } },
+          y: { beginAtZero: true, ticks: { color: '#ccc' } }
+        }
+      }
+    });
+
+    socket.on('packet_rate', data => {
+      const ts = data.timestamp;
+      const count = data.count;
+      const maxPoints = 300;
+
+      trafficChart.data.labels.push(ts);
+      trafficChart.data.datasets[0].data.push(count);
+      trafficChart.data.datasets[1].data.push(null);
+
+      if (trafficChart.data.labels.length > maxPoints) {
+        trafficChart.data.labels.shift();
+        trafficChart.data.datasets[0].data.shift();
+        trafficChart.data.datasets[1].data.shift();
+      }
+
+      trafficChart.update();
+    });
+
+    setInterval(fetchDNS, 5000);
+  </script>
+</body>
+</html>
