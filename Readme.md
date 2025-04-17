@@ -114,7 +114,7 @@ The server runs at: `http://localhost:5000`
 
 ---
 
-## 📸 Screenshot (Optional)
+## 📸 Screenshot
 
 ![Main UI](./shot1.png)
 
